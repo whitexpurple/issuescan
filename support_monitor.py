@@ -6,6 +6,7 @@ import re
 import time
 
 from database import get_connection
+from delivery import TelegramNotification
 
 logger = logging.getLogger("support-monitor")
 MAX_EXCERPT = 280
@@ -85,10 +86,19 @@ class SupportMonitor:
             guild_name = guild.get("name") or f"Server {guild_id}"
             channel_name = channel.get("name") or f"channel-{channel_id}"
             author_name = author.get("global_name") or author.get("username") or author_id
-            text = (f"🆘 Possible support request · score {score}\n"
-                    f"Server: {guild_name}\nChannel: #{channel_name}\n"
-                    f"Author: {author_name} ({author_id})\nKeywords detected: {matched}\n"
-                    f"Message: {excerpt}\n{self.message_link(guild_id, channel_id, message_id)}")
+            username = author.get("username") or "Unknown"
+            notification = TelegramNotification()
+            notification.add(f"🆘 Possible support request\n")
+            notification.field("Score", score)
+            notification.field("Server", guild_name)
+            notification.field("Channel", f"#{channel_name}")
+            notification.field("User", author_name)
+            notification.field("Username", username)
+            notification.field("User ID", author_id)
+            notification.field("Keywords detected", matched)
+            notification.field("Message", excerpt)
+            notification.link("View Message in Discord", self.message_link(guild_id, channel_id, message_id))
+            text, entities = notification.render()
             with conn:
                 cursor = conn.execute("""INSERT OR IGNORE INTO support_alerts
                     (message_id,account_id,guild_id,channel_id,author_id,score,matched,excerpt,created_at,
@@ -98,7 +108,8 @@ class SupportMonitor:
                      guild_name, channel_name, author_name, message_at))
                 if not cursor.rowcount:
                     return False
-                self.outbox.insert(conn, text, f"support:{message_id}", notification_type="support")
+                self.outbox.insert(conn, text, f"support:{message_id}", entities=entities,
+                                   notification_type="support")
             self.alert_count += 1
             self.outbox.wake.set()
             return True
