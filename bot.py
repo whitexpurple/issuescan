@@ -67,7 +67,7 @@ async def main():
 
     async def send(text, entities=None):
         await limiter.wait_if_needed()
-        preview_option = {"disable_web_page_preview": True} if entities else {}
+        preview_option = {"disable_web_page_preview": True}
         await app.bot.send_message(chat_id=chat_id, text=text, entities=entities,
                                    **preview_option)
 

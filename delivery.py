@@ -164,7 +164,7 @@ class NotificationOutbox:
         entities = [MessageEntity(**entity) for entity in json.loads(raw_entities)] if raw_entities else None
         try:
             await self.limiter.wait_if_needed()
-            preview_option = {"disable_web_page_preview": True} if entities else {}
+            preview_option = {"disable_web_page_preview": True}
             await self.bot.send_message(chat_id=self.chat_id, text=text, entities=entities,
                                         **preview_option)
         except Exception as error:
