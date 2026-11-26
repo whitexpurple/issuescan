@@ -88,8 +88,7 @@ class SupportMonitor:
             author_name = author.get("global_name") or author.get("username") or author_id
             username = author.get("username") or "Unknown"
             notification = TelegramNotification()
-            notification.add(f"🆘 Possible support request\n")
-            notification.field("Score", score)
+            notification.add(f"🆘 Possible support request · score {score}\n")
             notification.field("Server", guild_name)
             notification.field("Channel", f"#{channel_name}")
             notification.field("User", author_name)
