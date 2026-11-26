@@ -8,7 +8,6 @@ import subprocess
 import tempfile
 
 SERVICE_NAME = "issuescan.service"
-LEGACY_SERVICE_NAME = "ticketbridge.service"
 
 
 def unit_value(value):
@@ -96,11 +95,6 @@ def main():
     )
     subprocess.run(["runuser", "-u", user, "--", str(python), "-c", check], cwd=project, check=True)
     target = Path("/etc/systemd/system") / SERVICE_NAME
-    legacy_target = target.parent / LEGACY_SERVICE_NAME
-    if legacy_target.exists():
-        subprocess.run(["systemctl", "disable", "--now", LEGACY_SERVICE_NAME], check=True)
-        legacy_target.unlink()
-        subprocess.run(["systemctl", "daemon-reload"], check=True)
     install_unit(unit, target)
     subprocess.run(["systemctl", "daemon-reload"], check=True)
     subprocess.run(["systemctl", "enable", SERVICE_NAME], check=True)

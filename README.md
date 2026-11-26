@@ -16,7 +16,7 @@ sudo python3 install_service.py
 
 Configure `TELEGRAM_TOKEN` and `TELEGRAM_CHAT_ID` in `.env`. The Telegram chat ID also identifies the sole authorized administrator. Connect Discord accounts using `/connect` or `/addtoken` in that administrator's private Telegram chat.
 
-The service installer creates the `issuescan` systemd service. Use `sudo systemctl status issuescan --no-pager`, `sudo journalctl -u issuescan -f`, and `sudo systemctl restart issuescan` to manage it. On upgrade, the installer stops and removes the old `ticketbridge.service` unit before starting IssueScan. Do not run two instances against the same database.
+The service installer creates or updates the `issuescan` systemd service. Use `sudo systemctl status issuescan --no-pager`, `sudo journalctl -u issuescan -f`, and `sudo systemctl restart issuescan` to manage it. Do not run two IssueScan instances against the same database.
 
 ## Matching rules
 
