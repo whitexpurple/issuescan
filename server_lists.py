@@ -24,7 +24,7 @@ class ServerLists:
         finally:
             conn.close()
 
-    async def show(self, update, text, markup):
+    async def show(self, update, text, markup, ttl=SERVER_LIST_TTL):
         async with self.lock:
             message = update.effective_message
             if update.callback_query:
@@ -39,7 +39,7 @@ class ServerLists:
                 message = await message.reply_text(text, reply_markup=markup)
             # Pagination must preserve the original deadline.
             self.query("INSERT OR IGNORE INTO telegram_server_lists VALUES (?,?,?)",
-                       (message.chat_id, message.message_id, time.time() + SERVER_LIST_TTL))
+                       (message.chat_id, message.message_id, time.time() + ttl))
 
     async def _close(self, chat_id, message_id):
         try:

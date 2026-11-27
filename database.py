@@ -240,22 +240,27 @@ def init_db():
                          "WHERE phrase IN ('never mind','solved')")
 
         conn.execute("INSERT OR IGNORE INTO support_settings(setting,value) VALUES ('threshold','3')")
-        for phrase, weight, category in (
-            ("login", 1, "topic"), ("log in", 1, "topic"), ("password", 1, "topic"),
-            ("billing", 1, "topic"), ("account", 1, "topic"), ("can't", 2, "problem"),
-            ("cannot", 2, "problem"), ("unable to", 2, "problem"), ("failed", 2, "problem"),
-            ("error", 2, "problem"), ("broken", 2, "problem"), ("not working", 2, "problem"),
-            ("doesn't work", 2, "problem"), ("does not work", 2, "problem"),
-            ("locked out", 3, "problem"), ("need help", 3, "help"), ("help me", 3, "help"),
-            ("can anyone help", 3, "help"), ("can someone help", 3, "help"),
-            ("how do i fix", 3, "help"), ("how can i fix", 3, "help"),
-            ("error code", 1, "detail"), ("i tried", 1, "detail"), ("already tried", 1, "detail"),
-            ("fixed", 3, "resolution"), ("works now", 3, "resolution"),
-            ("resolved", 3, "resolution"), ("never mind", 3, "resolution"),
-            ("figured it out", 3, "resolution"), ("solved", 3, "resolution"),
-        ):
-            conn.execute("INSERT OR IGNORE INTO support_rules(phrase,weight,category) VALUES (?,?,?)",
-                         (phrase, weight, category))
+        rules_seeded = conn.execute(
+            "SELECT 1 FROM support_settings WHERE setting='support_rules_seeded'"
+        ).fetchone()
+        if not rules_seeded:
+            for phrase, weight, category in (
+                ("login", 1, "topic"), ("log in", 1, "topic"), ("password", 1, "topic"),
+                ("billing", 1, "topic"), ("account", 1, "topic"), ("can't", 2, "problem"),
+                ("cannot", 2, "problem"), ("unable to", 2, "problem"), ("failed", 2, "problem"),
+                ("error", 2, "problem"), ("broken", 2, "problem"), ("not working", 2, "problem"),
+                ("doesn't work", 2, "problem"), ("does not work", 2, "problem"),
+                ("locked out", 3, "problem"), ("need help", 3, "help"), ("help me", 3, "help"),
+                ("can anyone help", 3, "help"), ("can someone help", 3, "help"),
+                ("how do i fix", 3, "help"), ("how can i fix", 3, "help"),
+                ("error code", 1, "detail"), ("i tried", 1, "detail"), ("already tried", 1, "detail"),
+                ("fixed", 3, "resolution"), ("works now", 3, "resolution"),
+                ("resolved", 3, "resolution"), ("never mind", 3, "resolution"),
+                ("figured it out", 3, "resolution"), ("solved", 3, "resolution"),
+            ):
+                conn.execute("INSERT OR IGNORE INTO support_rules(phrase,weight,category) VALUES (?,?,?)",
+                             (phrase, weight, category))
+            conn.execute("INSERT INTO support_settings(setting,value) VALUES ('support_rules_seeded','1')")
 
         conn.execute("""UPDATE tickets SET account_id=(
             SELECT tracked_channels.account_id FROM tracked_channels

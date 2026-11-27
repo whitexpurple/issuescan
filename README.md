@@ -27,9 +27,10 @@ The service installer creates or updates the `issuescan` systemd service. Use `s
 - `/ruleadd help 2 can anyone help` adds or updates a help-request signal.
 - `/ruleadd detail 1 error code` adds or updates a useful-detail signal.
 - `/ruleadd resolution 3 works now` adds a phrase that reduces the score.
+- `/ruleadd *` starts a bulk prompt. Paste one `/ruleadd ...` command per line; IssueScan previews the parsed rules and asks before saving (up to 100 lines).
 - `/ruleadd 5 login` remains supported and treats the phrase as a topic signal.
 - `/ruleexclude solved` suppresses alerts for messages containing that phrase.
-- `/ruledel 3` deletes the rule with that ID.
+- `/ruledel 3 8` deletes rules with IDs 3 and 8; `/ruledel all` deletes every configured rule.
 - `/threshold 4` changes the score required to alert.
 
 Matching is case-insensitive and requires whole-word or whole-phrase boundaries. For each signal category, only its strongest matched weight contributes, so overlapping phrases do not inflate the score. Resolution weight is subtracted, and an exclusion phrase suppresses the alert. A bare topic such as `login` is informational and scores low; `can't log in` combines problem and topic signals, while a help request such as `can anyone help` adds another signal. Messages are classified as unresolved problems, help requests, informational mentions, resolved issues, or noise; alerts are sent only for likely unresolved problems and help requests that reach the threshold.

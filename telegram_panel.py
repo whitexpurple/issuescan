@@ -16,6 +16,8 @@ from delivery import chunks
 from database import get_connection
 
 SETUP_TTL = 300
+BULK_RULE_LIMIT = 100
+RULES_PANEL_TTL = 10 * 60
 logger = logging.getLogger(__name__)
 def is_authorized(update):
     try:
@@ -39,6 +41,7 @@ def clear_setup(context):
 
 def begin_setup(context, step="email"):
     clear_setup(context)
+    context.user_data.pop("bulk_ruleadd", None)
     state = {"step": step, "expires": time.monotonic() + SETUP_TTL}
     context.user_data["discord_setup"] = state
 
@@ -57,6 +60,7 @@ async def start(update, context):
     if not is_authorized(update):
         return
     clear_setup(context)
+    context.user_data.pop("bulk_ruleadd", None)
     await update.effective_message.reply_text(
         "IssueScan\n\nLive support-request matching across connected Discord accounts.",
         reply_markup=InlineKeyboardMarkup([
@@ -104,14 +108,16 @@ async def cancel(update, context):
     if not is_authorized(update):
         return
     clear_setup(context)
+    context.user_data.pop("bulk_ruleadd", None)
     logger.info("Discord setup cancelled by administrator.")
-    await update.effective_message.reply_text("Setup cancelled. Your current connection is unchanged.")
+    await update.effective_message.reply_text("Pending setup or bulk rule entry cancelled. Your current connection is unchanged.")
 
 
 async def reconnect(update, context):
     if not is_authorized(update):
         return
     clear_setup(context)
+    context.user_data.pop("bulk_ruleadd", None)
     manager = context.application.bot_data["discord_session"]
     disconnected = [item for item in manager.summaries() if not item["connected"]]
     if not disconnected:
@@ -181,16 +187,105 @@ async def rules(update, context):
     lines.extend(f"{row[0]}. {'EXCLUDE' if row[3] else row[5].upper()} · {row[1]} · {row[2]} · {'ON' if row[4] else 'OFF'}" for row in rows)
     lines.extend(["", "/ruleadd <category> <weight> <phrase>",
                   "Categories: topic, problem, help, detail, resolution",
+                  "/ruleadd * (paste multiple /ruleadd commands)",
                   "/ruleadd <weight> <phrase> (defaults to topic)",
-                  "/ruleexclude <phrase>", "/ruledel <id>",
+                  "/ruleexclude <phrase>", "/ruledel <id1> [id2 ...] or /ruledel all",
                   "/threshold <score>", "/lookback [hours] (explicit scan of recent messages)"])
-    await update.effective_message.reply_text("\n".join(lines))
+    await context.application.bot_data["server_lists"].show(
+        update, "\n".join(lines),
+        InlineKeyboardMarkup([[InlineKeyboardButton("Close", callback_data="rules:close")]]),
+        ttl=RULES_PANEL_TTL,
+    )
+
+
+def parse_bulk_rules(text):
+    categories = {"topic", "problem", "help", "detail", "resolution"}
+    parsed, errors = {}, []
+    for line_number, raw_line in enumerate(text.splitlines(), 1):
+        line = raw_line.strip()
+        if not line or line.startswith("```") or line.startswith("#"):
+            continue
+        parts = line.split(None, 1)
+        if parts and parts[0].split("@", 1)[0].lower() == "/ruleadd":
+            line = parts[1].strip() if len(parts) > 1 else ""
+        parts = line.split(None, 2)
+        if len(parts) >= 3 and parts[0].lower() in categories:
+            category, weight_text, phrase = parts[0].lower(), parts[1], parts[2].strip()
+        else:
+            legacy = line.split(None, 1)
+            if len(legacy) < 2:
+                errors.append((line_number, "expected category, weight, and phrase"))
+                continue
+            category, weight_text, phrase = "topic", legacy[0], legacy[1].strip()
+        try:
+            weight = int(weight_text)
+            if category not in categories or not 1 <= weight <= 20 or not phrase or len(phrase) > 100:
+                raise ValueError
+        except ValueError:
+            errors.append((line_number, "invalid category, weight (1-20), or phrase length"))
+            continue
+        parsed[phrase.casefold()] = (category, weight, phrase)
+    return list(parsed.values()), errors
+
+
+async def accept_bulk_rule_paste(update, context, text):
+    state = context.user_data.get("bulk_ruleadd")
+    if not state or state.get("stage") != "paste":
+        return False
+    if time.monotonic() >= state["expires"]:
+        context.user_data.pop("bulk_ruleadd", None)
+        await update.effective_message.reply_text("Bulk rule entry expired. Start again with /ruleadd *.")
+        return True
+    rules, errors = parse_bulk_rules(text)
+    if len(rules) > BULK_RULE_LIMIT:
+        await update.effective_message.reply_text(
+            f"Please paste no more than {BULK_RULE_LIMIT} valid rules at a time.")
+        context.user_data.pop("bulk_ruleadd", None)
+        return True
+    if not rules:
+        context.user_data.pop("bulk_ruleadd", None)
+        await update.effective_message.reply_text("I couldn't find valid rules in that paste. Start again with /ruleadd *.")
+        return True
+    state.update(stage="confirm", rules=rules, errors=errors)
+    preview = [f"Ready to add or update {len(rules)} rules:"]
+    preview.extend(f"• {category} {weight} {phrase}" for category, weight, phrase in rules[:15])
+    if len(rules) > 15:
+        preview.append(f"…and {len(rules) - 15} more.")
+    if errors:
+        preview.append(f"Skipped {len(errors)} invalid line(s): " + "; ".join(
+            f"line {number}: {reason}" for number, reason in errors[:8]))
+        if len(errors) > 8:
+            preview.append(f"…and {len(errors) - 8} more invalid line(s).")
+    preview.append("Save these rules?")
+    await update.effective_message.reply_text(
+        "\n".join(preview),
+        reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton("Save rules", callback_data="rulebulk:save"),
+            InlineKeyboardButton("Cancel", callback_data="rulebulk:cancel"),
+        ]]),
+    )
+    return True
 
 
 async def ruleadd(update, context):
     if not is_authorized(update):
         return
     args = context.args or []
+    if await accept_bulk_rule_paste(update, context, update.effective_message.text or ""):
+        return
+    if args == ["*"]:
+        if context.user_data.get("discord_setup"):
+            await update.effective_message.reply_text("Finish or cancel the Discord setup before starting bulk rule entry.")
+            return
+        context.user_data["bulk_ruleadd"] = {"stage": "paste", "expires": time.monotonic() + SETUP_TTL}
+        await update.effective_message.reply_text(
+            "Paste one rule per line, for example:\n"
+            "/ruleadd topic 1 wallet\n/ruleadd problem 2 transaction stuck\n"
+            "/ruleadd help 3 can anyone help\n\n"
+            "Categories: topic, problem, help, detail, resolution. "
+            "You can paste up to 100 rules. I’ll preview them before saving."
+        )
+        return
     categories = {"topic", "problem", "help", "detail", "resolution"}
     try:
         if args and args[0].lower() in categories:
@@ -241,18 +336,42 @@ async def ruleexclude(update, context):
 async def ruledel(update, context):
     if not is_authorized(update):
         return
+    args = context.args or []
+    if not args or (any(arg.lower() == "all" for arg in args) and len(args) != 1):
+        await update.effective_message.reply_text("Usage: /ruledel <id1> [id2 ...] | /ruledel all")
+        return
+    if len(args) == 1 and args[0].lower() == "all":
+        conn = get_connection()
+        try:
+            with conn:
+                count = conn.execute("SELECT COUNT(*) FROM support_rules").fetchone()[0]
+                conn.execute("DELETE FROM support_rules")
+        finally:
+            conn.close()
+        await update.effective_message.reply_text(f"Deleted all {count} rule(s).")
+        return
     try:
-        rule_id = int((context.args or [""])[0])
+        rule_ids = list(dict.fromkeys(int(arg) for arg in args))
+        if any(rule_id <= 0 for rule_id in rule_ids):
+            raise ValueError
     except ValueError:
-        await update.effective_message.reply_text("Usage: /ruledel <rule id>")
+        await update.effective_message.reply_text("Usage: /ruledel <positive id1> [id2 ...] | /ruledel all")
         return
     conn = get_connection()
     try:
         with conn:
-            cursor = conn.execute("DELETE FROM support_rules WHERE id=?", (rule_id,))
+            placeholders = ",".join("?" for _ in rule_ids)
+            found = {row[0] for row in conn.execute(
+                f"SELECT id FROM support_rules WHERE id IN ({placeholders})", rule_ids).fetchall()}
+            conn.execute(f"DELETE FROM support_rules WHERE id IN ({placeholders})", rule_ids)
     finally:
         conn.close()
-    await update.effective_message.reply_text("Rule deleted." if cursor.rowcount else "No rule has that ID.")
+    deleted = len(found)
+    missing = [str(rule_id) for rule_id in rule_ids if rule_id not in found]
+    response = f"Deleted {deleted} rule(s)."
+    if missing:
+        response += " Unknown ID(s): " + ", ".join(missing) + "."
+    await update.effective_message.reply_text(response)
 
 
 async def threshold(update, context):
@@ -520,9 +639,37 @@ async def button_handler(update, context):
         if action == "connect":
             logger.warning("Telegram Connect Discord button denied: private administrator chat required.")
         return
-    if not action.startswith("feedback:"):
+    if not action.startswith(("feedback:", "rulebulk:")):
         await update.callback_query.answer()
-    if action.startswith("feedback:"):
+    if action.startswith("rulebulk:"):
+        state = context.user_data.get("bulk_ruleadd")
+        if not state or state.get("stage") != "confirm" or time.monotonic() >= state["expires"]:
+            context.user_data.pop("bulk_ruleadd", None)
+            await update.callback_query.answer("This bulk rule preview expired. Start again with /ruleadd *.",
+                                              show_alert=True)
+            return
+        if action == "rulebulk:cancel":
+            context.user_data.pop("bulk_ruleadd", None)
+            await update.callback_query.answer("Bulk rule entry cancelled.")
+            await update.callback_query.edit_message_text("Bulk rule entry cancelled.")
+            return
+        if action != "rulebulk:save":
+            await update.callback_query.answer("Unknown bulk rule action.", show_alert=True)
+            return
+        conn = get_connection()
+        try:
+            with conn:
+                for category, weight, phrase in state["rules"]:
+                    conn.execute("INSERT INTO support_rules(phrase,weight,exclusion,category) VALUES (?,?,0,?) "
+                                 "ON CONFLICT(phrase) DO UPDATE SET weight=excluded.weight,exclusion=0,"
+                                 "category=excluded.category,enabled=1", (phrase, weight, category))
+        finally:
+            conn.close()
+        count = len(state["rules"])
+        context.user_data.pop("bulk_ruleadd", None)
+        await update.callback_query.answer(f"Saved {count} rules.")
+        await update.callback_query.edit_message_text(f"Saved or updated {count} rules.")
+    elif action.startswith("feedback:"):
         parts = action.split(":", 2)
         if len(parts) != 3 or parts[1] not in ("useful", "noise"):
             return
@@ -550,6 +697,11 @@ async def button_handler(update, context):
     elif action == "accounts:close":
         message = update.effective_message
         await context.application.bot_data["server_lists"].close(message.chat_id, message.message_id)
+    elif action == "rules:close":
+        message = update.effective_message
+        closed = await context.application.bot_data["server_lists"].close(message.chat_id, message.message_id)
+        if not closed:
+            await message.reply_text("Could not close the rules panel yet. I will retry automatically.")
     elif action == "rules":
         await rules(update, context)
     elif action == "report":
@@ -626,6 +778,8 @@ async def button_handler(update, context):
 
 async def setup_message(update, context):
     if not is_authorized(update):
+        return
+    if await accept_bulk_rule_paste(update, context, update.effective_message.text or ""):
         return
     state = context.user_data.get("discord_setup")
     if not state:
