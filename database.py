@@ -134,7 +134,7 @@ def init_db():
                 text TEXT NOT NULL, created_at REAL NOT NULL,
                 attempts INTEGER NOT NULL DEFAULT 0,
                 next_attempt REAL NOT NULL DEFAULT 0,
-                delivered_at REAL, last_error TEXT, entities TEXT
+                delivered_at REAL, last_error TEXT, entities TEXT, reply_markup TEXT
             );
             CREATE INDEX IF NOT EXISTS outbox_pending ON notification_outbox(chat_id, delivered_at, id);
             CREATE TABLE IF NOT EXISTS notification_preferences (
@@ -185,7 +185,7 @@ def init_db():
             CREATE TABLE IF NOT EXISTS support_rules (
                 id INTEGER PRIMARY KEY AUTOINCREMENT, phrase TEXT NOT NULL UNIQUE,
                 weight INTEGER NOT NULL DEFAULT 1, exclusion INTEGER NOT NULL DEFAULT 0,
-                enabled INTEGER NOT NULL DEFAULT 1
+                enabled INTEGER NOT NULL DEFAULT 1, category TEXT NOT NULL DEFAULT 'topic'
             );
             CREATE TABLE IF NOT EXISTS support_settings (
                 setting TEXT PRIMARY KEY, value TEXT NOT NULL
@@ -195,7 +195,12 @@ def init_db():
                 channel_id TEXT NOT NULL, author_id TEXT NOT NULL, score INTEGER NOT NULL,
                 matched TEXT NOT NULL, excerpt TEXT NOT NULL, created_at REAL NOT NULL,
                 guild_name TEXT NOT NULL DEFAULT '', channel_name TEXT NOT NULL DEFAULT '',
-                author_name TEXT NOT NULL DEFAULT '', message_at REAL NOT NULL DEFAULT 0
+                author_name TEXT NOT NULL DEFAULT '', message_at REAL NOT NULL DEFAULT 0,
+                issue_type TEXT NOT NULL DEFAULT 'unresolved problem'
+            );
+            CREATE TABLE IF NOT EXISTS support_feedback (
+                message_id TEXT PRIMARY KEY, feedback TEXT NOT NULL,
+                created_at REAL NOT NULL
             );
             CREATE INDEX IF NOT EXISTS support_alerts_created ON support_alerts(created_at);
             CREATE TABLE IF NOT EXISTS support_activity (
@@ -217,15 +222,40 @@ def init_db():
                 conn.execute(f"ALTER TABLE support_alerts ADD COLUMN {column} TEXT NOT NULL DEFAULT ''")
         if "message_at" not in alert_columns:
             conn.execute("ALTER TABLE support_alerts ADD COLUMN message_at REAL NOT NULL DEFAULT 0")
+        if "issue_type" not in alert_columns:
+            conn.execute("ALTER TABLE support_alerts ADD COLUMN issue_type TEXT NOT NULL DEFAULT 'unresolved problem'")
+
+        rule_columns = {row[1] for row in conn.execute("PRAGMA table_info(support_rules)")}
+        if "category" not in rule_columns:
+            conn.execute("ALTER TABLE support_rules ADD COLUMN category TEXT NOT NULL DEFAULT 'topic'")
+            conn.execute("UPDATE support_rules SET category='problem',weight=2,exclusion=0 "
+                         "WHERE phrase IN (?,?)", ("i can't log in", "can't log in"))
+            conn.execute("UPDATE support_rules SET category='problem',weight=3,exclusion=0 "
+                         "WHERE phrase='locked out'")
+            conn.execute("UPDATE support_rules SET category='help',weight=3,exclusion=0 "
+                         "WHERE phrase='need help'")
+            conn.execute("UPDATE support_rules SET category='problem',weight=2,exclusion=0 "
+                         "WHERE phrase='not working'")
+            conn.execute("UPDATE support_rules SET category='resolution',weight=3,exclusion=0 "
+                         "WHERE phrase IN ('never mind','solved')")
 
         conn.execute("INSERT OR IGNORE INTO support_settings(setting,value) VALUES ('threshold','3')")
-        for phrase, weight, exclusion in (
-            ("i can't log in", 5, 0), ("can't log in", 5, 0),
-            ("locked out", 4, 0), ("need help", 2, 0), ("login", 1, 0),
-            ("not working", 2, 0), ("never mind", 0, 1), ("solved", 0, 1),
+        for phrase, weight, category in (
+            ("login", 1, "topic"), ("log in", 1, "topic"), ("password", 1, "topic"),
+            ("billing", 1, "topic"), ("account", 1, "topic"), ("can't", 2, "problem"),
+            ("cannot", 2, "problem"), ("unable to", 2, "problem"), ("failed", 2, "problem"),
+            ("error", 2, "problem"), ("broken", 2, "problem"), ("not working", 2, "problem"),
+            ("doesn't work", 2, "problem"), ("does not work", 2, "problem"),
+            ("locked out", 3, "problem"), ("need help", 3, "help"), ("help me", 3, "help"),
+            ("can anyone help", 3, "help"), ("can someone help", 3, "help"),
+            ("how do i fix", 3, "help"), ("how can i fix", 3, "help"),
+            ("error code", 1, "detail"), ("i tried", 1, "detail"), ("already tried", 1, "detail"),
+            ("fixed", 3, "resolution"), ("works now", 3, "resolution"),
+            ("resolved", 3, "resolution"), ("never mind", 3, "resolution"),
+            ("figured it out", 3, "resolution"), ("solved", 3, "resolution"),
         ):
-            conn.execute("INSERT OR IGNORE INTO support_rules(phrase,weight,exclusion) VALUES (?,?,?)",
-                         (phrase, weight, exclusion))
+            conn.execute("INSERT OR IGNORE INTO support_rules(phrase,weight,category) VALUES (?,?,?)",
+                         (phrase, weight, category))
 
         conn.execute("""UPDATE tickets SET account_id=(
             SELECT tracked_channels.account_id FROM tracked_channels
@@ -245,6 +275,8 @@ def init_db():
             conn.execute("ALTER TABLE notification_outbox ADD COLUMN entities TEXT")
         if "notification_type" not in outbox_columns:
             conn.execute("ALTER TABLE notification_outbox ADD COLUMN notification_type TEXT")
+        if "reply_markup" not in outbox_columns:
+            conn.execute("ALTER TABLE notification_outbox ADD COLUMN reply_markup TEXT")
 
         report_columns = {row[1] for row in conn.execute("PRAGMA table_info(daily_reports)")}
         if "account_id" not in report_columns:

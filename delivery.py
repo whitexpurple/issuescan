@@ -6,7 +6,7 @@ import time
 import logging
 from datetime import datetime, timedelta, timezone
 
-from telegram import MessageEntity
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, MessageEntity
 from telegram.error import RetryAfter
 from database import get_connection
 
@@ -107,13 +107,16 @@ class NotificationOutbox:
         finally:
             conn.close()
 
-    def insert(self, conn, text, key, entities=None, notification_type=None):
-        for index, (part, part_entities) in enumerate(chunks_with_entities(text, entities)):
+    def insert(self, conn, text, key, entities=None, notification_type=None, reply_markup=None):
+        parts = chunks_with_entities(text, entities)
+        for index, (part, part_entities) in enumerate(parts):
+            markup = reply_markup if index == len(parts) - 1 else None
             conn.execute("""INSERT OR IGNORE INTO notification_outbox
-                (event_key, chat_id, text, created_at, entities, notification_type)
-                VALUES (?, ?, ?, ?, ?, ?)""",
+                (event_key, chat_id, text, created_at, entities, notification_type, reply_markup)
+                VALUES (?, ?, ?, ?, ?, ?, ?)""",
                          (f"{key}:{index}", self.chat_id, part, time.time(),
-                          json.dumps(part_entities) if part_entities else None, notification_type))
+                          json.dumps(part_entities) if part_entities else None, notification_type,
+                          json.dumps(markup) if markup else None))
 
     def enqueue(self, text, key, mutation=None, entities=None, notification_type=None):
         conn = get_connection()
@@ -154,18 +157,25 @@ class NotificationOutbox:
     async def deliver_once(self):
         conn = get_connection()
         try:
-            row = conn.execute("""SELECT id, text, entities, attempts, next_attempt FROM notification_outbox
+            row = conn.execute("""SELECT id, text, entities, attempts, next_attempt, reply_markup FROM notification_outbox
                 WHERE delivered_at IS NULL AND chat_id=? ORDER BY id LIMIT 1""", (self.chat_id,)).fetchone()
         finally:
             conn.close()
         if not row or row[4] > time.time():
             return False
-        row_id, text, raw_entities, attempts, _ = row
+        row_id, text, raw_entities, attempts, _, raw_markup = row
         entities = [MessageEntity(**entity) for entity in json.loads(raw_entities)] if raw_entities else None
+        keyboard = None
+        if raw_markup:
+            keyboard = InlineKeyboardMarkup([
+                [InlineKeyboardButton(button["text"], callback_data=button["callback_data"])
+                 for button in line] for line in json.loads(raw_markup)
+            ])
         try:
             await self.limiter.wait_if_needed()
             preview_option = {"disable_web_page_preview": True}
             await self.bot.send_message(chat_id=self.chat_id, text=text, entities=entities,
+                                        reply_markup=keyboard,
                                         **preview_option)
         except Exception as error:
             delay = min(300, 2 ** min(attempts + 1, 8))

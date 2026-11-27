@@ -4,7 +4,7 @@ import asyncio
 import os
 import time
 import logging
-from collections import defaultdict
+from collections import Counter, defaultdict
 from datetime import datetime, timezone
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
@@ -173,12 +173,16 @@ async def rules(update, context):
     conn = get_connection()
     try:
         threshold = conn.execute("SELECT value FROM support_settings WHERE setting='threshold'").fetchone()[0]
-        rows = conn.execute("SELECT id,phrase,weight,exclusion,enabled FROM support_rules ORDER BY id").fetchall()
+        rows = conn.execute("SELECT id,phrase,weight,exclusion,enabled,category FROM support_rules ORDER BY id").fetchall()
     finally:
         conn.close()
-    lines = [f"Support matching threshold: {threshold}", "Rules (phrase · weight; exclusions suppress an alert):"]
-    lines.extend(f"{row[0]}. {'EXCLUDE' if row[3] else 'MATCH'} · {row[1]} · {row[2]} · {'ON' if row[4] else 'OFF'}" for row in rows)
-    lines.extend(["", "/ruleadd <weight> <phrase>", "/ruleexclude <phrase>", "/ruledel <id>",
+    lines = [f"Support matching threshold: {threshold}",
+             "Rules (one strongest weight per category; resolution lowers the total):"]
+    lines.extend(f"{row[0]}. {'EXCLUDE' if row[3] else row[5].upper()} · {row[1]} · {row[2]} · {'ON' if row[4] else 'OFF'}" for row in rows)
+    lines.extend(["", "/ruleadd <category> <weight> <phrase>",
+                  "Categories: topic, problem, help, detail, resolution",
+                  "/ruleadd <weight> <phrase> (defaults to topic)",
+                  "/ruleexclude <phrase>", "/ruledel <id>",
                   "/threshold <score>", "/lookback [hours] (explicit scan of recent messages)"])
     await update.effective_message.reply_text("\n".join(lines))
 
@@ -187,23 +191,34 @@ async def ruleadd(update, context):
     if not is_authorized(update):
         return
     args = context.args or []
+    categories = {"topic", "problem", "help", "detail", "resolution"}
     try:
-        weight = int(args[0])
-        phrase = " ".join(args[1:]).strip()
+        if args and args[0].lower() in categories:
+            if len(args) < 3:
+                raise ValueError
+            category = args[0].lower()
+            weight = int(args[1])
+            phrase = " ".join(args[2:]).strip()
+        else:
+            category = "topic"
+            weight = int(args[0])
+            phrase = " ".join(args[1:]).strip()
         if not phrase or not 1 <= weight <= 20 or len(phrase) > 100:
             raise ValueError
     except (ValueError, IndexError):
-        await update.effective_message.reply_text("Usage: /ruleadd <weight 1-20> <phrase>")
+        await update.effective_message.reply_text(
+            "Usage: /ruleadd <topic|problem|help|detail|resolution> <weight 1-20> <phrase>")
         return
     conn = get_connection()
     try:
         with conn:
-            conn.execute("INSERT INTO support_rules(phrase,weight,exclusion) VALUES (?,?,0) "
-                         "ON CONFLICT(phrase) DO UPDATE SET weight=excluded.weight,exclusion=0,enabled=1",
-                         (phrase, weight))
+            conn.execute("INSERT INTO support_rules(phrase,weight,exclusion,category) VALUES (?,?,0,?) "
+                         "ON CONFLICT(phrase) DO UPDATE SET weight=excluded.weight,exclusion=0,"
+                         "category=excluded.category,enabled=1", (phrase, weight, category))
     finally:
         conn.close()
-    await update.effective_message.reply_text(f"Matching rule saved: {phrase} (weight {weight}).")
+    await update.effective_message.reply_text(
+        f"{category.title()} rule saved: {phrase} (weight {weight}).")
 
 
 async def ruleexclude(update, context):
@@ -300,14 +315,17 @@ async def report(update, context):
             FROM support_activity WHERE bucket_start>=? GROUP BY guild_id ORDER BY SUM(message_count) DESC""",
             (bucket_cutoff,)).fetchall()
         alerts = conn.execute("""SELECT guild_id,guild_name,channel_id,channel_name,author_id,
-            author_name,score,matched,excerpt,message_id,message_at FROM support_alerts
+            author_name,score,matched,excerpt,message_id,message_at,issue_type FROM support_alerts
             WHERE message_at>=? ORDER BY message_at DESC LIMIT 8""", (cutoff,)).fetchall()
         issue_counts = dict(conn.execute("SELECT guild_id,COUNT(*) FROM support_alerts "
                                          "WHERE message_at>=? GROUP BY guild_id", (cutoff,)).fetchall())
+        feedback_counts = dict(conn.execute("SELECT feedback,COUNT(*) FROM support_feedback "
+                                            "WHERE created_at>=? GROUP BY feedback", (cutoff,)).fetchall())
         with conn:
             conn.execute("DELETE FROM support_activity WHERE bucket_start<?", (int((time.time() - 30 * 86400) // 300) * 300,))
             conn.execute("DELETE FROM support_scanned_messages WHERE scanned_at<?", (time.time() - 30 * 86400,))
             conn.execute("DELETE FROM support_alerts WHERE message_at<?", (time.time() - 30 * 86400,))
+            conn.execute("DELETE FROM support_feedback WHERE created_at<?", (time.time() - 30 * 86400,))
     finally:
         conn.close()
 
@@ -321,7 +339,8 @@ async def report(update, context):
     total_messages = sum(row[1] or 0 for row in activity)
     total_issues = sum(issue_counts.values())
     lines = [f"IssueScan activity report · last {hours} hours",
-             f"Messages checked: {total_messages} · Active servers: {len(activity)} · Likely issues: {total_issues}"]
+             f"Messages checked: {total_messages} · Active servers: {len(activity)} · Likely issues: {total_issues}",
+             f"Alert feedback: {feedback_counts.get('useful', 0)} useful · {feedback_counts.get('noise', 0)} not an issue"]
     if activity:
         lines.append("\nActive servers:")
         for guild_id, count, _last_seen in activity[:20]:
@@ -334,15 +353,59 @@ async def report(update, context):
     if alerts:
         lines.append("\nRecent likely issues:")
         for row in alerts:
-            guild_id, saved_guild, channel_id, channel_name, author_id, author_name, score, matched, excerpt, message_id, _message_at = row
+            guild_id, saved_guild, channel_id, channel_name, author_id, author_name, score, matched, excerpt, message_id, _message_at, issue_type = row
             guild_name = guild_names.get(str(guild_id), saved_guild or f"Server {guild_id}")
             link = f"https://discord.com/channels/{guild_id}/{channel_id}/{message_id}"
             lines.append(f"\n• {guild_name} · #{channel_name or channel_id} · "
                          f"{author_name or author_id} · score {score}\n"
+                         f"Type: {issue_type.title()}\n"
                          f"Keywords detected: {matched}\n{excerpt}\n{link}")
     else:
         lines.append("\nNo likely support requests matched the current rules.")
 
+    for part in chunks("\n".join(lines)):
+        await update.effective_message.reply_text(part, disable_web_page_preview=True)
+
+
+async def feedback(update, context):
+    if not is_authorized(update):
+        return
+    try:
+        limit = int((context.args or ["10"])[0])
+        if not 1 <= limit <= 20:
+            raise ValueError
+    except ValueError:
+        await update.effective_message.reply_text("Usage: /feedback [1-20]")
+        return
+    conn = get_connection()
+    try:
+        rows = conn.execute("""SELECT f.feedback,a.guild_name,a.channel_name,a.author_name,
+            a.issue_type,a.score,a.matched,a.excerpt FROM support_feedback f
+            JOIN support_alerts a ON a.message_id=f.message_id
+            ORDER BY f.created_at DESC LIMIT ?""", (limit,)).fetchall()
+        labeled_matches = conn.execute("""SELECT f.feedback,a.matched FROM support_feedback f
+            JOIN support_alerts a ON a.message_id=f.message_id
+            ORDER BY f.created_at DESC LIMIT 500""").fetchall()
+    finally:
+        conn.close()
+    if not rows:
+        await update.effective_message.reply_text("No alert feedback yet. New alerts include Useful issue and Not an issue buttons.")
+        return
+    noisy = Counter(phrase.strip() for label, matches in labeled_matches if label == "noise"
+                    for phrase in (matches or "").split(",") if phrase.strip())
+    useful = Counter(phrase.strip() for label, matches in labeled_matches if label == "useful"
+                     for phrase in (matches or "").split(",") if phrase.strip())
+    lines = ["Recent alert feedback:"]
+    if noisy:
+        lines.append("Most common phrases in ‘Not an issue’ labels: " +
+                     ", ".join(f"{phrase} ({count})" for phrase, count in noisy.most_common(5)))
+    if useful:
+        lines.append("Most common phrases in ‘Useful issue’ labels: " +
+                     ", ".join(f"{phrase} ({count})" for phrase, count in useful.most_common(5)))
+    for label, guild, channel, author, issue_type, score, matched, excerpt in rows:
+        lines.append(f"\n• {label.replace('_', ' ').title()} · {guild} · #{channel} · {author}")
+        lines.append(f"Type: {issue_type.title()} · score {score} · matched: {matched}")
+        lines.append(excerpt)
     for part in chunks("\n".join(lines)):
         await update.effective_message.reply_text(part, disable_web_page_preview=True)
 
@@ -451,13 +514,34 @@ async def server_account_picker(update, context):
 
 
 async def button_handler(update, context):
-    await update.callback_query.answer()
+    action = update.callback_query.data
     if not is_authorized(update):
-        if update.callback_query.data == "connect":
+        await update.callback_query.answer()
+        if action == "connect":
             logger.warning("Telegram Connect Discord button denied: private administrator chat required.")
         return
-    action = update.callback_query.data
-    if action == "connect":
+    if not action.startswith("feedback:"):
+        await update.callback_query.answer()
+    if action.startswith("feedback:"):
+        parts = action.split(":", 2)
+        if len(parts) != 3 or parts[1] not in ("useful", "noise"):
+            return
+        _, value, message_id = parts
+        conn = get_connection()
+        try:
+            with conn:
+                exists = conn.execute("SELECT 1 FROM support_alerts WHERE message_id=?", (message_id,)).fetchone()
+                if not exists:
+                    await update.callback_query.answer("This alert is no longer available.", show_alert=True)
+                    return
+                conn.execute("""INSERT INTO support_feedback(message_id,feedback,created_at) VALUES(?,?,?)
+                    ON CONFLICT(message_id) DO UPDATE SET feedback=excluded.feedback,created_at=excluded.created_at""",
+                    (message_id, value, time.time()))
+        finally:
+            conn.close()
+        await update.callback_query.answer("Feedback saved. Thanks!")
+        await update.callback_query.edit_message_reply_markup(reply_markup=None)
+    elif action == "connect":
         await connect(update, context)
     elif action == "addtoken":
         await addtoken(update, context)
@@ -672,7 +756,7 @@ def register_handlers(application):
     application.add_error_handler(telegram_error_handler)
     for command, handler in (("start", start), ("connect", connect), ("addtoken", addtoken),
                              ("reconnect", reconnect),
-                             ("cancel", cancel), ("status", status), ("report", report),
+                             ("cancel", cancel), ("status", status), ("report", report), ("feedback", feedback),
                              ("rules", rules), ("ruleadd", ruleadd), ("ruleexclude", ruleexclude),
                              ("ruledel", ruledel), ("threshold", threshold), ("lookback", lookback),
                              ("servers", servers), ("accounts", accounts),
